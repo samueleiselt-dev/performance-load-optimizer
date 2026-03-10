@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 
 
 def prepare_runs_dataframe(activities):
@@ -16,6 +17,14 @@ def prepare_runs_dataframe(activities):
 
     # Datum konvertieren
     df["start_date"] = pd.to_datetime(df["start_date"])
+
+    # Herzfrequenz-Spalten übernehmen, falls vorhanden
+    if "average_heartrate" in df.columns:
+        df["avg_hr"] = df["average_heartrate"]
+
+    if "max_heartrate" in df.columns:
+        df["max_hr"] = df["max_heartrate"]
+
 
     return df
 
@@ -37,6 +46,14 @@ def calculate_average_pace(df):
         return None
 
     return total_time / total_distance
+
+# Berechnet die Gesamttrainingszeit der letzten 7 Tage
+def calculate_weekly_training_time(df):
+    df = df.copy()
+
+    last_7_days = df[df["start_date"] >= (pd.Timestamp.utcnow() - pd.Timedelta(days=7))]
+
+    return last_7_days["moving_time_min"].sum()
 
 
 # -----------------------------
@@ -77,6 +94,7 @@ def calculate_long_run_per_week(df):
     long_run.columns = ["Woche", "Long Run (km)"]
 
     return long_run
+
 
 
 # -----------------------------
@@ -240,3 +258,264 @@ def interpret_long_run_ratio(long_run_ratio):
             "status": "Sehr hoch",
             "message": "Dein Long Run Anteil ist sehr hoch im Verhältnis zum Wochenumfang."
         }
+
+# -----------------------------
+# Konsistenz-Metriken
+# -----------------------------
+def calculate_consistency_score(df):
+    df = df.copy()
+
+    last_7_days = df[df["start_date"] >= (pd.Timestamp.utcnow() - pd.Timedelta(days=7))]
+
+    if last_7_days.empty:
+        return 0
+
+    unique_run_days = last_7_days["start_date"].dt.date.nunique()
+
+    return (unique_run_days / 7) * 100
+
+def interpret_consistency_score(consistency_score):
+    if consistency_score == 0:
+        return {
+            "status": "Keine Aktivität",
+            "message": "In den letzten 7 Tagen wurden keine Läufe erfasst."
+        }
+
+    if consistency_score < 30:
+        return {
+            "status": "Niedrig",
+            "message": "Deine Trainingsfrequenz ist aktuell eher niedrig."
+        }
+    elif consistency_score < 60:
+        return {
+            "status": "Solide",
+            "message": "Du trainierst bereits einigermaßen regelmäßig."
+        }
+    elif consistency_score < 85:
+        return {
+            "status": "Gut",
+            "message": "Deine Trainingsfrequenz ist konstant und stabil."
+        }
+    else:
+        return {
+            "status": "Sehr hoch",
+            "message": "Du trainierst an fast jedem Tag der Woche."
+        }
+    
+# -----------------------------
+# Distanz-Metriken
+# -----------------------------
+def calculate_average_run_distance(df):
+    df = df.copy()
+
+    if df.empty:
+        return None
+
+    total_distance = df["distance_km"].sum()
+    total_runs = len(df)
+
+    if total_runs == 0:
+        return None
+
+    return total_distance / total_runs
+
+
+# -----------------------------
+# Herzfrequenz-Metriken
+# -----------------------------
+# Berechnet die maximale Herzfrequenz über alle Läufe
+def calculate_average_heart_rate(df):
+    if "avg_hr" not in df.columns:
+        return None
+
+    hr_data = df["avg_hr"].dropna()
+
+    if hr_data.empty:
+        return None
+
+    return hr_data.mean()
+
+# Berechnet die maximale Herzfrequenz über alle Läufe
+def calculate_max_heart_rate(df):
+    if "max_hr" not in df.columns:
+        return None
+
+    hr_data = df["max_hr"].dropna()
+
+    if hr_data.empty:
+        return None
+
+    return hr_data.max()
+
+# Berechnet die durchschnittliche Herzfrequenz pro Woche
+def calculate_average_hr_per_week(df):
+    df = df.copy()
+
+    if "avg_hr" not in df.columns:
+        return pd.DataFrame()
+
+    hr_df = df.dropna(subset=["avg_hr"]).copy()
+
+    if hr_df.empty:
+        return pd.DataFrame()
+
+    hr_df["week"] = hr_df["start_date"].dt.strftime("%Y-KW%V")
+    weekly_avg_hr = hr_df.groupby("week")["avg_hr"].mean().reset_index()
+    weekly_avg_hr.columns = ["Woche", "Average HR"]
+
+    return weekly_avg_hr
+
+# Bereitet die Daten für die Pace vs. Herzfrequenz-Analyse vor
+def prepare_pace_vs_hr_data(df):
+    df = df.copy()
+
+    required_columns = ["pace_min_per_km", "avg_hr", "name", "distance_km", "start_date"]
+
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        return pd.DataFrame()
+
+    scatter_df = df.dropna(subset=["pace_min_per_km", "avg_hr"]).copy()
+
+    if scatter_df.empty:
+        return pd.DataFrame()
+
+    scatter_df["date"] = scatter_df["start_date"].dt.strftime("%Y-%m-%d")
+
+    return scatter_df[["start_date", "date", "name", "distance_km", "pace_min_per_km", "avg_hr"]]
+
+# Berechnet die geschätzte Pace bei einer Herzfrequenz von 150 bpm pro Woche (Pace @ 150 bpm)
+def calculate_pace_at_hr_per_week(df, baseline_hr=150):
+    df = df.copy()
+
+    required_columns = ["avg_hr", "pace_min_per_km", "start_date"]
+
+    # Prüfen ob notwendige Spalten vorhanden sind
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        return pd.DataFrame()
+
+    # Nur Läufe mit Pace und HR verwenden
+    valid_runs = df.dropna(subset=["avg_hr", "pace_min_per_km"]).copy()
+
+    if valid_runs.empty:
+        return pd.DataFrame()
+
+    # Kalenderwoche berechnen
+    valid_runs["week"] = valid_runs["start_date"].dt.strftime("%Y-KW%V")
+
+    weekly_rows = []
+
+    grouped = valid_runs.groupby("week")
+
+    for week, group in grouped:
+
+        # Mindestens zwei Läufe nötig für Regression
+        if len(group) < 2:
+            continue
+
+        x = group["avg_hr"]
+        y = group["pace_min_per_km"]
+
+        # Lineare Regression Pace ~ HR
+        slope, intercept = np.polyfit(x, y, 1)
+
+        # Geschätzte Pace bei baseline_hr
+        pace_at_hr = slope * baseline_hr + intercept
+
+        weekly_rows.append({
+            "Woche": week,
+            "Pace @ 150 bpm": pace_at_hr
+        })
+
+    pace_at_hr_df = pd.DataFrame(weekly_rows)
+
+    if pace_at_hr_df.empty:
+        return pd.DataFrame()
+
+    # Reihenfolge für Trendlinie
+    pace_at_hr_df["week_order"] = range(len(pace_at_hr_df))
+
+    # Formatierte Pace für Tooltips (mm:ss)
+    pace_at_hr_df["pace_formatted"] = pace_at_hr_df["Pace @ 150 bpm"].apply(
+        lambda x: f"{int(x)}:{int((x - int(x)) * 60):02d}"
+    )
+
+    return pace_at_hr_df
+
+
+# -----------------------------
+# Efficiency Metriken
+# -----------------------------
+def calculate_efficiency_score(df):
+    df = df.copy()
+
+    required_columns = ["distance_km", "moving_time_min", "avg_hr"]
+
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        return None
+
+    valid_runs = df.dropna(subset=["avg_hr", "distance_km", "moving_time_min"])
+
+    if valid_runs.empty:
+        return None
+
+    # Speed = km pro Minute
+    valid_runs["speed_km_per_min"] = valid_runs["distance_km"] / valid_runs["moving_time_min"]
+
+    # Efficiency = Speed / HR
+    valid_runs["efficiency"] = valid_runs["speed_km_per_min"] / valid_runs["avg_hr"]
+
+    return valid_runs["efficiency"].mean()
+
+
+def calculate_efficiency_baseline(df, baseline_hr=150):
+    df = df.copy()
+
+    required_columns = ["avg_hr", "pace_min_per_km"]
+
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        return None
+
+    valid_runs = df.dropna(subset=["avg_hr", "pace_min_per_km"]).copy()
+
+    if len(valid_runs) < 2:
+        return None
+
+    x = valid_runs["avg_hr"]
+    y = valid_runs["pace_min_per_km"]
+
+    slope, intercept = np.polyfit(x, y, 1)
+
+    baseline_pace = slope * baseline_hr + intercept
+
+    return baseline_pace
+
+# -----------------------------
+# Efficiency Trend
+# -----------------------------
+def calculate_efficiency_per_week(df):
+    df = df.copy()
+
+    required_columns = ["distance_km", "moving_time_min", "avg_hr", "start_date"]
+
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        return pd.DataFrame()
+
+    valid_runs = df.dropna(subset=["distance_km", "moving_time_min", "avg_hr"]).copy()
+
+    if valid_runs.empty:
+        return pd.DataFrame()
+
+    valid_runs["speed_km_per_min"] = valid_runs["distance_km"] / valid_runs["moving_time_min"]
+    valid_runs["efficiency"] = (valid_runs["speed_km_per_min"] / valid_runs["avg_hr"]) * 1000
+    valid_runs["week"] = valid_runs["start_date"].dt.strftime("%Y-KW%V")
+
+    weekly_efficiency = valid_runs.groupby("week")["efficiency"].mean().reset_index()
+    weekly_efficiency.columns = ["Woche", "Efficiency"]
+    weekly_efficiency["week_order"] = range(len(weekly_efficiency))
+
+    return weekly_efficiency
