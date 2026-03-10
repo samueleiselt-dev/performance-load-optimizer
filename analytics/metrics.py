@@ -1,6 +1,11 @@
 import pandas as pd
 import numpy as np
 
+def get_reference_date(df):
+    if df.empty:
+        return None
+
+    return df["start_date"].max()
 
 def prepare_runs_dataframe(activities):
     df = pd.DataFrame(activities)
@@ -25,6 +30,7 @@ def prepare_runs_dataframe(activities):
     if "max_heartrate" in df.columns:
         df["max_hr"] = df["max_heartrate"]
 
+    df = df.sort_values("start_date").reset_index(drop=True)
 
     return df
 
@@ -32,9 +38,14 @@ def prepare_runs_dataframe(activities):
 # -----------------------------
 # Basis-Metriken
 # -----------------------------
-# Berechnet die Gesamtdistanz der letzten 7 Tage
+# Berechnet die Gesamtstrecke der letzten 7 Tage
 def calculate_rolling_weekly_distance(df):
-    last_7_days = df[df["start_date"] >= (pd.Timestamp.utcnow() - pd.Timedelta(days=7))]
+    reference_date = get_reference_date(df)
+
+    if reference_date is None:
+        return 0
+
+    last_7_days = df[df["start_date"] >= (reference_date - pd.Timedelta(days=7))]
     return last_7_days["distance_km"].sum()
 
 # Berechnet die durchschnittliche Pace über alle Läufe
@@ -47,11 +58,16 @@ def calculate_average_pace(df):
 
     return total_time / total_distance
 
-# Berechnet die Gesamttrainingszeit der letzten 7 Tage
+# Berechnet die Gesamtzeit der letzten 7 Tage
 def calculate_weekly_training_time(df):
     df = df.copy()
 
-    last_7_days = df[df["start_date"] >= (pd.Timestamp.utcnow() - pd.Timedelta(days=7))]
+    reference_date = get_reference_date(df)
+
+    if reference_date is None:
+        return 0
+
+    last_7_days = df[df["start_date"] >= (reference_date - pd.Timedelta(days=7))]
 
     return last_7_days["moving_time_min"].sum()
 
@@ -103,15 +119,62 @@ def calculate_long_run_per_week(df):
 # Berechnet die Trainingsbelastung der letzten 7 Tage
 def calculate_7_day_training_load(df):
     df = df.copy()
-    last_7_days = df[df["start_date"] >= (pd.Timestamp.utcnow() - pd.Timedelta(days=7))]
+
+    reference_date = get_reference_date(df)
+
+    if reference_date is None:
+        return 0
+
+    last_7_days = df[df["start_date"] >= (reference_date - pd.Timedelta(days=7))]
     training_load_7d = last_7_days["moving_time_min"].sum()
 
     return training_load_7d
 
+# Berechnet die tägliche Trainingsbelastung (Summe der Trainingszeit pro Tag)
+def calculate_daily_training_load(df):
+    df = df.copy()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # Datum extrahieren
+    df["date"] = df["start_date"].dt.date
+
+    # Tageslast berechnen
+    daily_load = df.groupby("date")["moving_time_min"].sum().reset_index()
+    daily_load.columns = ["Datum", "Daily Training Load"]
+
+    daily_load["Datum"] = pd.to_datetime(daily_load["Datum"])
+
+    # vollständige Datumsreihe erzeugen
+    full_date_range = pd.date_range(
+        start=daily_load["Datum"].min(),
+        end=daily_load["Datum"].max()
+    )
+
+    daily_load = daily_load.set_index("Datum").reindex(full_date_range)
+
+    daily_load["Daily Training Load"] = daily_load["Daily Training Load"].fillna(0)
+
+    daily_load = daily_load.reset_index()
+    daily_load.columns = ["Datum", "Daily Training Load"]
+
+    # Rolling Load berechnen
+    daily_load["Load 7d"] = daily_load["Daily Training Load"].rolling(window=7).mean()
+    daily_load["Load 28d"] = daily_load["Daily Training Load"].rolling(window=28).mean()
+
+    return daily_load
+
 # Berechnet die Trainingsbelastung der letzten 28 Tage
 def calculate_28_day_training_load(df):
     df = df.copy()
-    last_28_days = df[df["start_date"] >= (pd.Timestamp.utcnow() - pd.Timedelta(days=28))]
+
+    reference_date = get_reference_date(df)
+
+    if reference_date is None:
+        return 0
+
+    last_28_days = df[df["start_date"] >= (reference_date - pd.Timedelta(days=28))]
     training_load_28d = last_28_days["moving_time_min"].sum()
 
     return training_load_28d
@@ -157,11 +220,15 @@ def interpret_load_ratio(load_ratio):
 def calculate_ramp_rate(df):
     df = df.copy()
 
-    now = pd.Timestamp.utcnow()
-    current_7d = df[df["start_date"] >= (now - pd.Timedelta(days=7))]
+    reference_date = get_reference_date(df)
+
+    if reference_date is None:
+        return None
+
+    current_7d = df[df["start_date"] >= (reference_date - pd.Timedelta(days=7))]
     previous_7d = df[
-        (df["start_date"] < (now - pd.Timedelta(days=7))) &
-        (df["start_date"] >= (now - pd.Timedelta(days=14)))
+        (df["start_date"] < (reference_date - pd.Timedelta(days=7))) &
+        (df["start_date"] >= (reference_date - pd.Timedelta(days=14)))
     ]
 
     current_load = current_7d["moving_time_min"].sum()
@@ -202,6 +269,20 @@ def interpret_ramp_rate(ramp_rate):
             "status": "Kritisch",
             "message": "Deine Belastung ist sehr stark gestiegen."
         }
+    
+def calculate_fitness_fatigue_form(df):
+    daily_load = calculate_daily_training_load(df)
+
+    if daily_load.empty:
+        return pd.DataFrame()
+
+    result = daily_load.copy()
+
+    result["Fatigue"] = result["Daily Training Load"].ewm(span=7, adjust=False).mean()
+    result["Fitness"] = result["Daily Training Load"].ewm(span=28, adjust=False).mean()
+    result["Form"] = result["Fitness"] - result["Fatigue"]
+
+    return result
 
 # -----------------------------
 # Long Run-Metriken
@@ -210,15 +291,29 @@ def interpret_ramp_rate(ramp_rate):
 def calculate_long_run_ratio(df):
     df = df.copy()
 
-    last_7_days = df[df["start_date"] >= (pd.Timestamp.utcnow() - pd.Timedelta(days=7))]
+    reference_date = get_reference_date(df)
+
+    if reference_date is None:
+        return None
+
+    last_7_days = df[df["start_date"] >= (reference_date - pd.Timedelta(days=7))]
 
     weekly_distance = last_7_days["distance_km"].sum()
 
     if weekly_distance == 0:
         return None
 
-    # nur Läufe >= 8 km als Long Run zählen
     potential_long_runs = last_7_days[last_7_days["distance_km"] >= 8]
+
+    if potential_long_runs.empty:
+        return None
+
+    long_run_distance = potential_long_runs["distance_km"].max()
+
+    return long_run_distance / weekly_distance
+
+    # nur Läufe >= 8 km als Long Run zählen
+    potential_long_runs = last_7_days[last_7_days["distance_km"] >= 10]
 
     if potential_long_runs.empty:
         return None
@@ -265,7 +360,12 @@ def interpret_long_run_ratio(long_run_ratio):
 def calculate_consistency_score(df):
     df = df.copy()
 
-    last_7_days = df[df["start_date"] >= (pd.Timestamp.utcnow() - pd.Timedelta(days=7))]
+    reference_date = get_reference_date(df)
+
+    if reference_date is None:
+        return 0
+
+    last_7_days = df[df["start_date"] >= (reference_date - pd.Timedelta(days=7))]
 
     if last_7_days.empty:
         return 0
@@ -411,7 +511,11 @@ def calculate_pace_at_hr_per_week(df, baseline_hr=150):
     for week, group in grouped:
 
         # Mindestens zwei Läufe nötig für Regression
-        if len(group) < 2:
+        if len(group) < 3:
+            continue
+
+        # HR-Range prüfen
+        if group["avg_hr"].max() - group["avg_hr"].min() < 5:
             continue
 
         x = group["avg_hr"]
@@ -519,3 +623,45 @@ def calculate_efficiency_per_week(df):
     weekly_efficiency["week_order"] = range(len(weekly_efficiency))
 
     return weekly_efficiency
+
+# -----------------------------
+# Forecasting
+# -----------------------------
+def forecast_fitness_fatigue_form(df, days=14):
+
+    fff = calculate_fitness_fatigue_form(df)
+
+    if fff.empty:
+        return pd.DataFrame()
+
+    forecast_rows = []
+
+    last_row = fff.iloc[-1]
+
+    fitness = last_row["Fitness"]
+    fatigue = last_row["Fatigue"]
+    last_date = last_row["Datum"]
+
+    for i in range(1, days + 1):
+
+        date = last_date + pd.Timedelta(days=i)
+
+        # kein Training → Load = 0
+        load = 0
+
+        # exponentielle decay (ähnlich wie im TrainingPeaks Modell)
+        fatigue = fatigue * (1 - 1/7)
+        fitness = fitness * (1 - 1/28)
+
+        form = fitness - fatigue
+
+        forecast_rows.append({
+            "Datum": date,
+            "Fitness": fitness,
+            "Fatigue": fatigue,
+            "Form": form
+        })
+
+    forecast_df = pd.DataFrame(forecast_rows)
+
+    return forecast_df

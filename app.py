@@ -1,6 +1,7 @@
 import os
 import streamlit as st
 from dotenv import load_dotenv
+import pandas as pd
 
 from services.strava_api import (
     build_strava_auth_url,
@@ -35,7 +36,10 @@ from analytics.metrics import (
     calculate_efficiency_score,
     calculate_efficiency_per_week,
     calculate_efficiency_baseline,
-    calculate_pace_at_hr_per_week
+    calculate_pace_at_hr_per_week,
+    calculate_daily_training_load,
+    calculate_fitness_fatigue_form,
+    forecast_fitness_fatigue_form,
 )
 
 from utils.formatters import format_pace, format_minutes_to_hours
@@ -58,6 +62,25 @@ def initialize_session_state():
 
     if "activities" not in st.session_state:
         st.session_state["activities"] = None
+
+def filter_dataframe_by_time_range(df, selected_range):
+    if df.empty:
+        return df
+
+    latest_date = df["start_date"].max()
+
+    if selected_range == "Letzte 4 Wochen":
+        cutoff_date = latest_date - pd.Timedelta(weeks=4)
+    elif selected_range == "Letzte 3 Monate":
+        cutoff_date = latest_date - pd.Timedelta(days=90)
+    elif selected_range == "Letzte 6 Monate":
+        cutoff_date = latest_date - pd.Timedelta(days=180)
+    elif selected_range == "Letzte 12 Monate":
+        cutoff_date = latest_date - pd.Timedelta(days=365)
+    else:
+        return df
+
+    return df[df["start_date"] >= cutoff_date].copy()
 
 
 def render_sidebar(strava_client_id, strava_client_secret, redirect_uri, code, access_token, activities):
@@ -195,8 +218,23 @@ def calculate_chart_data(df):
         "pace_vs_hr_data": prepare_pace_vs_hr_data(df),
         "efficiency_per_week": calculate_efficiency_per_week(df),
         "pace_at_hr_per_week": calculate_pace_at_hr_per_week(df, baseline_hr=150),
+        "daily_training_load": calculate_daily_training_load(df),
+        "fitness_fatigue_form": calculate_fitness_fatigue_form(df),
+        "fitness_fatigue_form_forecast": forecast_fitness_fatigue_form(df),
     }
 
+def calculate_analysis_summary(df, selected_range):
+    total_runs = len(df)
+    total_distance = df["distance_km"].sum()
+    total_minutes = df["moving_time_min"].sum()
+
+    return {
+        "selected_range": selected_range,
+        "total_runs": total_runs,
+        "total_distance": total_distance,
+        "total_minutes": total_minutes,
+        "total_time_formatted": format_minutes_to_hours(total_minutes)
+    }
 
 def main():
     initialize_session_state()
@@ -236,9 +274,32 @@ def main():
     if df.empty:
         st.warning("Es wurden keine Laufaktivitäten gefunden.")
         return
+    
+    st.markdown("### Analysezeitraum")
 
-    metrics = calculate_metrics(df)
-    chart_data = calculate_chart_data(df)
+    col_filter, col_empty = st.columns([1, 3])
+    with col_filter:
+        selected_range = st.selectbox(
+            "Wähle den Zeitraum für die Analyse",
+        [
+                "Letzte 4 Wochen",
+                "Letzte 3 Monate",
+                "Letzte 6 Monate",
+                "Letzte 12 Monate",
+                "Alle Aktivitäten"
+            ],
+            index=1
+        )
+
+    filtered_df = filter_dataframe_by_time_range(df, selected_range)
+
+    if filtered_df.empty:
+        st.warning("Für den gewählten Zeitraum sind keine Laufaktivitäten vorhanden.")
+        return
+
+    metrics = calculate_metrics(filtered_df)
+    chart_data = calculate_chart_data(filtered_df)
+    analysis_summary = calculate_analysis_summary(filtered_df, selected_range)
 
     columns_to_show = [
         "name",
@@ -249,6 +310,22 @@ def main():
         "start_date"
     ]
     existing_columns = [col for col in columns_to_show if col in df.columns]
+
+    st.markdown("### Analyse-Zusammenfassung")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.metric("Zeitraum", analysis_summary["selected_range"])
+
+    with col2:
+        st.metric("Läufe", analysis_summary["total_runs"])
+
+    with col3:
+        st.metric("Kilometer", f"{analysis_summary['total_distance']:.1f} km")
+
+    with col4:
+        st.metric("Trainingszeit", analysis_summary["total_time_formatted"])
 
     tab_dashboard, tab_training, tab_activities, tab_test = st.tabs(
         ["Dashboard", "Training", "Aktivitäten", "Testbereich"]
