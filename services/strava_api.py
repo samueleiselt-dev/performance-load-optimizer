@@ -34,15 +34,24 @@ def exchange_code_for_token(client_id, client_secret, code):
     return None
 
 
-def fetch_activities(access_token, per_page=50, page=1):
+def fetch_activities(access_token, per_page=100, max_pages=5):
     activities_url = "https://www.strava.com/api/v3/athlete/activities"
-
     headers = {"Authorization": f"Bearer {access_token}"}
-    params = {"per_page": per_page, "page": page}
 
-    response = requests.get(activities_url, headers=headers, params=params)
+    all_activities = []
 
-    if response.status_code == 200:
-        return response.json()
+    for page in range(1, max_pages + 1):
+        params = {"per_page": per_page, "page": page}
+        response = requests.get(activities_url, headers=headers, params=params)
 
-    return None
+        if response.status_code != 200:
+            return None
+
+        page_activities = response.json()
+
+        if not page_activities:
+            break
+
+        all_activities.extend(page_activities)
+
+    return all_activities
